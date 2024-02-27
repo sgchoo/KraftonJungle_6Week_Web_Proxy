@@ -14,8 +14,7 @@ int parse_uri(char *uri, char *filename, char *cgiargs);
 void serve_static(int fd, char *filename, int filesize);
 void get_filetype(char *filename, char *filetype);
 void serve_dynamic(int fd, char *filename, char *cgiargs);
-void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
-                 char *longmsg);
+void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg);
 
 void doit(int fd)
 {
@@ -32,8 +31,8 @@ void doit(int fd)
   printf("%s", buf);
   sscanf(buf, "%s %s %s", method, uri, version);
 
-  // case1. GET 요청이 아닐시
-  if(strcasecmp(method, "GET"))
+  // GET 요청이 아닐시
+  if(!(strcasecmp(method, "GET") == 0 || strcasecmp(method, "HEAD") == 0))
   {
     clienterror(fd, method, "501", "Not implemented", "Tiny does not implement this method");
     return;
@@ -57,7 +56,9 @@ void doit(int fd)
       clienterror(fd, fileName, "403", "Forbidden", "Tiny couldn't read the file");
       return;
     }
-    serve_static(fd, fileName, sbuf.st_size);
+    // serve_static(fd, fileName, sbuf.st_size);
+    // CSAPP 11.11 practice
+    serve_static_HEAD(fd, fileName, sbuf.st_size, method);
   }
   else
   {
@@ -66,7 +67,9 @@ void doit(int fd)
       clienterror(fd, fileName, "403", "Forbidden", "Tiny couldn't run the CGI program");
       return;
     }
-    serve_dynamic(fd, fileName, cgiArgs);
+    // serve_dynamic(fd, fileName, cgiArgs);
+    // CSAPP 11.11 practice
+    serve_dynamic_HEAD(fd, fileName, cgiArgs, method);
   }
 }
 
@@ -74,8 +77,9 @@ void read_requesthdrs(rio_t *rp)
 {
   char buf[MAXLINE];
 
-  // 빈 줄이 나올 때까지 buf에 요청 헤더 정보를 읽는다.
+  // 첫 번째 헤더라인을 읽는다.(Method Request-URI HTTP-Version)
   Rio_readlineb(rp, buf, MAXLINE);
+  // 그 후 나머지 헤더 라인을 읽는다.
   while(strcmp(buf, "\r\n"))
   {
     Rio_readlineb(rp, buf, MAXLINE);
@@ -126,18 +130,58 @@ void serve_static(int fd, char *filename, int filesize)
   sprintf(buf, "%sServer: Tiny Web Server\r\n", buf);
   sprintf(buf, "%sConnection: close\r\n", buf);
   sprintf(buf, "%sContent-Length: %d\r\n", buf, filesize);
-  sprintf(buf, "%sContent-Type: %s\r\n", buf, fileType);
+  sprintf(buf, "%sContent-Type: %s\r\n\r\n", buf, fileType);
   Rio_writen(fd, buf, strlen(buf));
   printf("Response headers:\n");
   printf("%s", buf);
 
 
-  srcfd = Open(filename, O_RDONLY, 0);                        // 응답 결과물 클라이언트에게 반환
-  srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0);
+  // srcfd = Open(filename, O_RDONLY, 0);                        // 응답 결과물 클라이언트에게 반환
+  // srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0);
+  // Close(srcfd);
+  // Rio_writen(fd, srcp, filesize);
+  // Munmap(srcp, filesize);
+
+/*
+----------------------------------------------------------------------------------------------------
+CSAPP 11.9 practice
+*/
+  srcfd = Open(filename, O_RDONLY, 0);
+  srcp = malloc(filesize);
+  Rio_readn(srcfd, srcp, filesize);
   Close(srcfd);
   Rio_writen(fd, srcp, filesize);
-  Munmap(srcp, filesize);
+  free(srcp);
+// -------------------------------------------------------------------------------------------------
 }
+
+// -------------------------------------------------------------------------------------------------
+// CSAPP 11.11 practice
+void serve_static_HEAD(int fd, char *filename, int *filesize, char *method)
+{
+  int srcfd;
+  char *srcp, fileType[MAXLINE], buf[MAXBUF];
+
+  get_filetype(filename, fileType);
+  sprintf(buf, "HTTP/1.0 200 OK\r\n");
+  sprintf(buf, "%sServer: Tiny Web Server\r\n", buf);
+  sprintf(buf, "%sConnection: close\r\n", buf);
+  sprintf(buf, "%sContent-Length: %d\r\n", buf, filesize);
+  sprintf(buf, "%sContent-Type: %s\r\n\r\n", buf, fileType);
+  Rio_writen(fd, buf, strlen(buf));
+  printf("Response headers:\n");
+  printf("%s", buf);
+
+  if(strstr(method, "GET"))
+  {
+    srcfd = Open(filename, O_RDONLY, 0);
+    srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0);
+    Close(srcfd);
+    Rio_writen(fd, srcp, filesize);
+    Munmap(srcp, filesize);
+  }
+}
+// -------------------------------------------------------------------------------------------------
 
 void get_filetype(char *filename, char *filetype)
 {
@@ -149,6 +193,13 @@ void get_filetype(char *filename, char *filetype)
     strcpy(filetype, "image/png");
   else if(strstr(filename, ".jpg"))
     strcpy(filetype, "image/jpeg");
+/*
+---------------------------------------------------------------------------------------------------
+CSAPP 11.7 practice
+*/
+  else if(strstr(filename, ".mpg"))
+    strcpy(filetype, "video/mpg");
+// ------------------------------------------------------------------------------------------------
   else
     strcpy(filetype, "text/plain");
 }
@@ -169,6 +220,25 @@ void serve_dynamic(int fd, char *filename, char *cgiargs)
     Execve(filename, emptyList, environ);
   }
   Wait(NULL);                                 // 좀비프로세스 생성을 막기 위해 자식 프로세스 종료될 때까지 대기
+}
+
+void serve_dynamic_HEAD(int fd, char *filename, char *cgiargs, char *method)
+{
+  char buf[MAXLINE], *emptyList[] = { NULL };
+
+  sprintf(buf, "HTTP/1.0 200 OK\r\n");
+  Rio_writen(fd, buf, strlen(buf));
+  sprintf(buf, "Server: Tiny Web Server\r\n");
+  Rio_writen(fd, buf, strlen(buf));
+
+  if(Fork() == 0)
+  {
+    setenv("QUERY_STRING", cgiargs, 1);
+    setenv("REQUEST_METHOD", method, 1);        // 클라이언트가 사용한 메소드
+    Dup2(fd, STDOUT_FILENO);
+    Execve(filename, emptyList, environ);
+  }
+  Wait(NULL);    
 }
 
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg)
@@ -207,10 +277,8 @@ int main(int argc, char **argv)
   listenfd = Open_listenfd(argv[1]);
   while (1) {
     clientlen = sizeof(clientaddr);
-    connfd = Accept(listenfd, (SA *)&clientaddr,
-                    &clientlen);  // line:netp:tiny:accept
-    Getnameinfo((SA *)&clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE,
-                0);
+    connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);  // line:netp:tiny:accept
+    Getnameinfo((SA *)&clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE, 0);
     printf("Accepted connection from (%s, %s)\n", hostname, port);
     doit(connfd);   // line:netp:tiny:doit
     Close(connfd);  // line:netp:tiny:close
